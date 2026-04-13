@@ -23,6 +23,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
   const [zoom, setZoom] = useState(100);
+  const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
 
   const canvasElRef = useRef<HTMLCanvasElement>(null);
   const editorContainerRef = useRef<HTMLDivElement>(null);
@@ -148,7 +149,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
    * renderScale is chosen to fit the container at zoom=100,
    * then multiplied by zoom/100 for zooming.
    */
-  const renderPage = useCallback(async (pageNum: number, canvas?: any, fabric?: any, zoomOverride?: number) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+  const renderPage = useCallback(async (pageNum: number, canvas?: any, fabric?: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
     const c = canvas || fabricRef.current;
     const f = fabric || fabricModule.current;
     const container = editorContainerRef.current;
@@ -158,20 +159,19 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
 
     const page = await pdfDocRef.current.getPage(pageNum);
     const baseVP = page.getViewport({ scale: 1 });
-    const pdfW = baseVP.width;   // PDF points (e.g. 612)
-    const pdfH = baseVP.height;  // PDF points (e.g. 792)
+    const pdfW = baseVP.width;
+    const pdfH = baseVP.height;
 
     // Measure the container. Use window size as fallback if container hasn't laid out yet.
     const containerW = container.clientWidth > 100 ? container.clientWidth : window.innerWidth * 0.6;
     const containerH = container.clientHeight > 100 ? container.clientHeight : window.innerHeight - 60;
     const pad = 40;
-    const maxW = containerW - pad;
-    const maxH = containerH - pad;
-    const fitScale = Math.min(maxW / pdfW, maxH / pdfH);
+    const fitScale = Math.min((containerW - pad) / pdfW, (containerH - pad) / pdfH);
 
-    // Actual render scale = fitScale * zoom/100
-    const z = zoomOverride ?? zoom;
-    const renderScale = fitScale * (z / 100);
+    // Always render canvas at fit-scale (100% zoom equivalent).
+    // Visual zoom is handled via CSS transform — canvas pixel count stays constant
+    // so drawing performance is the same at any zoom level.
+    const renderScale = fitScale;
 
     const viewport = page.getViewport({ scale: renderScale });
 
@@ -209,6 +209,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
       }
     }
     c.renderAll();
+    setCanvasSize({ w: viewport.width, h: viewport.height });
     // Scroll editor container back to top so the full page is visible from the start
     container.scrollTop = 0;
     container.scrollLeft = 0;
@@ -221,7 +222,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
     }
     isNavigatingRef.current = false;
     updateUndoRedoState();
-  }, [updateUndoRedoState, zoom]);
+  }, [updateUndoRedoState]);
 
   // --- Load PDF ---
   useEffect(() => {
@@ -335,14 +336,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready]);
 
-  // --- Re-render when zoom changes ---
-  useEffect(() => {
-    if (!ready || !fabricRef.current) return;
-    // Save current annotations, re-render at new zoom
-    saveCurrentPageAnnotations();
-    renderPage(currentPage);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [zoom]);
+  // Zoom is applied as a CSS transform — no canvas re-render needed on zoom changes.
 
   // --- Tool mode ---
   useEffect(() => {
@@ -618,8 +612,15 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
               </div>
             ) : (
               <div className="flex items-start justify-center p-4 min-h-full">
-                <div className="shadow-2xl shadow-black/50">
-                  <canvas ref={canvasElRef} />
+                {/* Outer div reserves the zoomed layout space so the container scrolls correctly */}
+                <div style={{ width: canvasSize.w * zoom / 100, height: canvasSize.h * zoom / 100, flexShrink: 0 }}>
+                  {/* Inner div scales visually — CSS transform doesn't affect layout so we need the outer sizer */}
+                  <div
+                    className="shadow-2xl shadow-black/50"
+                    style={{ transformOrigin: 'top left', transform: `scale(${zoom / 100})` }}
+                  >
+                    <canvas ref={canvasElRef} />
+                  </div>
                 </div>
               </div>
             )}
