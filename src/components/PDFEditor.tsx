@@ -3,24 +3,13 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { PDFDocument } from "pdf-lib";
 
-type Tool =
-  | "select"
-  | "draw"
-  | "line"
-  | "rectangle"
-  | "circle"
-  | "text"
-  | "highlight"
-  | "eraser";
+type Tool = "select" | "draw" | "line" | "rectangle" | "circle" | "text" | "highlight" | "eraser";
 
 interface Props {
   pdfData: ArrayBuffer;
   fileName: string;
   onClose: () => void;
 }
-
-// We render the PDF at high res internally but scale the canvas to fit
-const INTERNAL_SCALE = 2;
 
 export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
   const [numPages, setNumPages] = useState(0);
@@ -33,15 +22,13 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
   const [ready, setReady] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
-  const [zoom, setZoom] = useState(100); // percentage: 100 = fit-to-page
+  const [zoom, setZoom] = useState(100);
 
   const canvasElRef = useRef<HTMLCanvasElement>(null);
   const editorContainerRef = useRef<HTMLDivElement>(null);
-  const canvasWrapperRef = useRef<HTMLDivElement>(null);
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const fabricRef = useRef<any>(null);
   const fabricModule = useRef<any>(null);
-  const pdfjsRef = useRef<any>(null);
   const pdfDocRef = useRef<any>(null);
   const activeShapeRef = useRef<any>(null);
   /* eslint-enable @typescript-eslint/no-explicit-any */
@@ -59,14 +46,13 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
   const historyRef = useRef<Map<number, string[]>>(new Map());
   const historyIndexRef = useRef<Map<number, number>>(new Map());
   const isRestoringRef = useRef(false);
-  const fitScaleRef = useRef(1); // the CSS scale to make canvas fit the container
-  const zoomRef = useRef(100);
+  // Store per-page: the scale used when rendering + base PDF page size
+  const pageRenderInfoRef = useRef<Map<number, { scale: number; pdfW: number; pdfH: number }>>(new Map());
 
   useEffect(() => { currentPageRef.current = currentPage; }, [currentPage]);
   useEffect(() => { toolRef.current = tool; }, [tool]);
   useEffect(() => { colorRef.current = color; }, [color]);
   useEffect(() => { strokeWidthRef.current = strokeWidth; }, [strokeWidth]);
-  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
 
   const updateUndoRedoState = useCallback(() => {
     const page = currentPageRef.current;
@@ -109,6 +95,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
     if (objects.length > 0) {
       const json = objects.map((o: any) => o.toObject()); // eslint-disable-line @typescript-eslint/no-explicit-any
       pageAnnotationsRef.current.set(page, JSON.stringify(json));
+      // Export annotation-only image
       const bg = canvas.backgroundImage;
       canvas.backgroundImage = undefined;
       canvas.renderAll();
@@ -128,7 +115,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
     if (images.size === 0) {
       const blob = new Blob([bytes.slice()], { type: "application/pdf" });
       const url = URL.createObjectURL(blob);
-      setPreviewUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return url; });
+      setPreviewUrl(prev => { if (prev) URL.revokeObjectURL(prev); return url; });
       return;
     }
     try {
@@ -147,7 +134,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
       const saved = await doc.save();
       const blob = new Blob([saved.buffer as ArrayBuffer], { type: "application/pdf" });
       const url = URL.createObjectURL(blob);
-      setPreviewUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return url; });
+      setPreviewUrl(prev => { if (prev) URL.revokeObjectURL(prev); return url; });
     } catch (err) {
       console.error("Auto-save error:", err);
     } finally {
@@ -155,42 +142,60 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
     }
   }, [saveCurrentPageAnnotations]);
 
-  // --- Apply CSS zoom to the canvas wrapper ---
-  const applyZoom = useCallback((zoomPercent: number) => {
-    const wrapper = canvasWrapperRef.current;
-    const container = editorContainerRef.current;
-    if (!wrapper || !container) return;
-    // At zoom=100, use fitScale (page fits container). Above 100 = zoomed in.
-    const cssScale = fitScaleRef.current * (zoomPercent / 100);
-    wrapper.style.transform = `scale(${cssScale})`;
-    wrapper.style.transformOrigin = "top left";
-  }, []);
-
-  // --- Render PDF page ---
-  const renderPage = useCallback(async (pageNum: number, canvas?: any, fabric?: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+  /**
+   * Render a PDF page onto the Fabric canvas.
+   * The canvas pixel size = PDF page size * renderScale.
+   * renderScale is chosen to fit the container at zoom=100,
+   * then multiplied by zoom/100 for zooming.
+   */
+  const renderPage = useCallback(async (pageNum: number, canvas?: any, fabric?: any, zoomOverride?: number) => { // eslint-disable-line @typescript-eslint/no-explicit-any
     const c = canvas || fabricRef.current;
     const f = fabric || fabricModule.current;
     const container = editorContainerRef.current;
     if (!c || !f || !pdfDocRef.current || !container) return;
 
     isNavigatingRef.current = true;
-    const page = await pdfDocRef.current.getPage(pageNum);
-    const viewport = page.getViewport({ scale: INTERNAL_SCALE });
 
+    const page = await pdfDocRef.current.getPage(pageNum);
+    const baseVP = page.getViewport({ scale: 1 });
+    const pdfW = baseVP.width;   // PDF points (e.g. 612)
+    const pdfH = baseVP.height;  // PDF points (e.g. 792)
+
+    // Calculate the scale where the page fits the container at zoom=100
+    const pad = 40;
+    const maxW = container.clientWidth - pad;
+    const maxH = container.clientHeight - pad;
+    const fitScale = Math.min(maxW / pdfW, maxH / pdfH);
+
+    // Actual render scale = fitScale * zoom/100
+    const z = zoomOverride ?? zoom;
+    const renderScale = fitScale * (z / 100);
+
+    const viewport = page.getViewport({ scale: renderScale });
+
+    // Render the PDF page to a temp canvas
     const tempCanvas = document.createElement("canvas");
     tempCanvas.width = viewport.width;
     tempCanvas.height = viewport.height;
     const ctx = tempCanvas.getContext("2d")!;
     await page.render({ canvasContext: ctx, viewport }).promise;
 
+    // Size the Fabric canvas to match exactly
     c.setDimensions({ width: viewport.width, height: viewport.height });
+
+    // Set PDF page as background
     const bgImage = await f.FabricImage.fromURL(tempCanvas.toDataURL());
     bgImage.scaleX = viewport.width / bgImage.width;
     bgImage.scaleY = viewport.height / bgImage.height;
 
+    // Clear old objects, set new background
     c.getObjects().slice().forEach((o: any) => c.remove(o)); // eslint-disable-line @typescript-eslint/no-explicit-any
     c.backgroundImage = bgImage;
 
+    // Store render info for annotation export
+    pageRenderInfoRef.current.set(pageNum, { scale: renderScale, pdfW, pdfH });
+
+    // Restore saved annotations (scaled to current render scale)
     const savedJson = pageAnnotationsRef.current.get(pageNum);
     if (savedJson) {
       const objects = JSON.parse(savedJson);
@@ -201,6 +206,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
     }
     c.renderAll();
 
+    // Init history
     if (!historyRef.current.has(pageNum)) {
       const objs = c.getObjects().map((o: any) => o.toObject()); // eslint-disable-line @typescript-eslint/no-explicit-any
       historyRef.current.set(pageNum, [JSON.stringify(objs)]);
@@ -208,21 +214,13 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
     }
     isNavigatingRef.current = false;
     updateUndoRedoState();
-
-    // Calculate fit scale: how much to CSS-scale so the canvas fits the container
-    const pad = 32;
-    const maxW = container.clientWidth - pad;
-    const maxH = container.clientHeight - pad;
-    fitScaleRef.current = Math.min(maxW / viewport.width, maxH / viewport.height);
-    applyZoom(zoomRef.current);
-  }, [updateUndoRedoState, applyZoom]);
+  }, [updateUndoRedoState, zoom]);
 
   // --- Load PDF ---
   useEffect(() => {
     const load = async () => {
       pdfBytesRef.current = new Uint8Array(pdfData).slice();
       const pdfjsLib = await import("pdfjs-dist");
-      pdfjsRef.current = pdfjsLib;
       pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
       const dataCopy = pdfBytesRef.current.slice();
       const doc = await pdfjsLib.getDocument({ data: dataCopy }).promise;
@@ -232,7 +230,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
       setPreviewUrl(URL.createObjectURL(blob));
       setReady(true);
     };
-    load().catch((err) => console.error("Failed to load PDF:", err));
+    load().catch(err => console.error("Failed to load PDF:", err));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -242,10 +240,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
     const init = async () => {
       const fabric = await import("fabric");
       fabricModule.current = fabric;
-      const canvas = new fabric.Canvas(canvasElRef.current!, {
-        isDrawingMode: true,
-        selection: false,
-      });
+      const canvas = new fabric.Canvas(canvasElRef.current!, { isDrawingMode: true, selection: false });
       const brush = new fabric.PencilBrush(canvas);
       brush.color = colorRef.current;
       brush.width = strokeWidthRef.current;
@@ -262,8 +257,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
       canvas.on("object:modified", onChange);
       canvas.on("object:removed", onChange);
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      canvas.on("mouse:down", (opt: any) => {
+      canvas.on("mouse:down", (opt: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
         const t = toolRef.current;
         if (t === "eraser") {
           if (opt.target) { canvas.remove(opt.target); canvas.renderAll(); }
@@ -275,8 +269,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
           const text = new fabric.IText("Type here", {
             left: p.x, top: p.y,
             fontSize: Math.max(18, strokeWidthRef.current * 6),
-            fill: colorRef.current,
-            fontFamily: "Arial, sans-serif",
+            fill: colorRef.current, fontFamily: "Arial, sans-serif",
           });
           canvas.add(text);
           canvas.setActiveObject(text);
@@ -300,8 +293,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
           }
         }
       });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      canvas.on("mouse:move", (opt: any) => {
+      canvas.on("mouse:move", (opt: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
         if (!isDrawingShapeRef.current || !activeShapeRef.current) return;
         const p = canvas.getScenePoint(opt.e);
         const s = shapeStartRef.current;
@@ -328,10 +320,14 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready]);
 
-  // --- Apply zoom when zoom state changes ---
+  // --- Re-render when zoom changes ---
   useEffect(() => {
-    applyZoom(zoom);
-  }, [zoom, applyZoom]);
+    if (!ready || !fabricRef.current) return;
+    // Save current annotations, re-render at new zoom
+    saveCurrentPageAnnotations();
+    renderPage(currentPage);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [zoom]);
 
   // --- Tool mode ---
   useEffect(() => {
@@ -410,16 +406,14 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         const delta = e.deltaY > 0 ? -10 : 10;
-        setZoom((prev) => Math.min(400, Math.max(50, prev + delta)));
+        setZoom(prev => Math.min(400, Math.max(50, prev + delta)));
       }
     };
     container.addEventListener("wheel", handler, { passive: false });
     return () => container.removeEventListener("wheel", handler);
   }, []);
 
-  const changeZoom = (delta: number) => {
-    setZoom((prev) => Math.min(400, Math.max(50, prev + delta)));
-  };
+  const changeZoom = (delta: number) => setZoom(prev => Math.min(400, Math.max(50, prev + delta)));
 
   const goToPage = useCallback(async (page: number) => {
     if (page < 1 || page > numPages || page === currentPageRef.current) return;
@@ -450,20 +444,18 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
   }, [updateUndoRedoState, triggerAutoSave]);
 
   const handleUndo = useCallback(async () => {
-    const page = currentPageRef.current;
-    const h = historyRef.current.get(page);
-    const i = historyIndexRef.current.get(page);
+    const p = currentPageRef.current;
+    const h = historyRef.current.get(p), i = historyIndexRef.current.get(p);
     if (!h || i === undefined || i <= 0) return;
-    historyIndexRef.current.set(page, i - 1);
+    historyIndexRef.current.set(p, i - 1);
     await restoreState(h[i - 1]);
   }, [restoreState]);
 
   const handleRedo = useCallback(async () => {
-    const page = currentPageRef.current;
-    const h = historyRef.current.get(page);
-    const i = historyIndexRef.current.get(page);
+    const p = currentPageRef.current;
+    const h = historyRef.current.get(p), i = historyIndexRef.current.get(p);
     if (!h || i === undefined || i >= h.length - 1) return;
-    historyIndexRef.current.set(page, i + 1);
+    historyIndexRef.current.set(p, i + 1);
     await restoreState(h[i + 1]);
   }, [restoreState]);
 
@@ -472,8 +464,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
     if (!canvas) return;
     canvas.getObjects().slice().forEach((o: any) => canvas.remove(o)); // eslint-disable-line @typescript-eslint/no-explicit-any
     canvas.renderAll();
-    pushToHistory();
-    triggerAutoSave();
+    pushToHistory(); triggerAutoSave();
   }, [pushToHistory, triggerAutoSave]);
 
   const handleDownload = useCallback(async () => {
@@ -500,15 +491,11 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
     }
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url;
-    a.download = fileName.replace(/\.pdf$/i, "_edited.pdf");
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    a.href = url; a.download = fileName.replace(/\.pdf$/i, "_edited.pdf");
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }, [fileName, saveCurrentPageAnnotations]);
 
-  // --- Tool icon definitions ---
   const toolItems: { id: Tool; label: string; shortcut: string; icon: React.ReactNode }[] = [
     { id: "select", label: "Select", shortcut: "V", icon: <path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z" /> },
     { id: "draw", label: "Draw", shortcut: "D", icon: <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" /> },
@@ -527,7 +514,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
     <div className="flex h-screen bg-slate-950">
       {/* Left Sidebar */}
       <div className="w-14 bg-slate-900 border-r border-slate-800 flex flex-col items-center py-3 gap-1 flex-shrink-0">
-        {toolItems.map((t) => (
+        {toolItems.map(t => (
           <button key={t.id} onClick={() => setTool(t.id)}
             className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all ${tool === t.id ? "bg-blue-600 text-white shadow-lg shadow-blue-600/30" : "text-slate-400 hover:text-white hover:bg-slate-800"}`}
             title={`${t.label} (${t.shortcut})`}>
@@ -535,35 +522,33 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
           </button>
         ))}
         <div className="w-8 h-px bg-slate-700 my-2" />
-        <button onClick={handleUndo} disabled={!canUndo} className="w-10 h-10 rounded-xl flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-20 disabled:cursor-not-allowed transition-all" title="Undo (Cmd+Z)">
+        <button onClick={handleUndo} disabled={!canUndo} className="w-10 h-10 rounded-xl flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-20 disabled:cursor-not-allowed transition-all" title="Undo">
           <svg {...svgBase}><path d="M3 7v6h6" /><path d="M21 17a9 9 0 0 0-9-9H3" /></svg>
         </button>
-        <button onClick={handleRedo} disabled={!canRedo} className="w-10 h-10 rounded-xl flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-20 disabled:cursor-not-allowed transition-all" title="Redo (Cmd+Shift+Z)">
+        <button onClick={handleRedo} disabled={!canRedo} className="w-10 h-10 rounded-xl flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-20 disabled:cursor-not-allowed transition-all" title="Redo">
           <svg {...svgBase}><path d="M21 7v6h-6" /><path d="M3 17a9 9 0 0 1 9-9h9" /></svg>
         </button>
-        <button onClick={clearAnnotations} className="w-10 h-10 rounded-xl flex items-center justify-center text-slate-400 hover:text-red-400 hover:bg-slate-800 transition-all" title="Clear annotations">
+        <button onClick={clearAnnotations} className="w-10 h-10 rounded-xl flex items-center justify-center text-slate-400 hover:text-red-400 hover:bg-slate-800 transition-all" title="Clear">
           <svg {...svgBase}><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
         </button>
         <div className="flex-1" />
         <div className="flex flex-col items-center gap-1.5 mb-2">
-          {colors.map((c) => (
+          {colors.map(c => (
             <button key={c} onClick={() => setColor(c)}
               className={`w-5 h-5 rounded-full border-2 transition-all ${color === c ? "border-white scale-125 shadow-lg" : "border-slate-700 hover:scale-110"}`}
               style={{ backgroundColor: c }} />
           ))}
-          <input type="color" value={color} onChange={(e) => setColor(e.target.value)} className="w-6 h-6 rounded cursor-pointer mt-1" title="Custom color" />
+          <input type="color" value={color} onChange={e => setColor(e.target.value)} className="w-6 h-6 rounded cursor-pointer mt-1" />
         </div>
         <div className="w-8 h-px bg-slate-700 my-1" />
         <div className="flex flex-col items-center gap-1 mb-2">
-          <div className="w-6 h-6 rounded-full bg-slate-800 flex items-center justify-center">
-            <span className="text-[10px] text-slate-300 font-mono">{strokeWidth}</span>
-          </div>
-          <input type="range" min="1" max="20" value={strokeWidth} onChange={(e) => setStrokeWidth(Number(e.target.value))} className="w-10"
+          <span className="text-[10px] text-slate-400 font-mono">{strokeWidth}px</span>
+          <input type="range" min="1" max="20" value={strokeWidth} onChange={e => setStrokeWidth(Number(e.target.value))} className="w-10"
             style={{ writingMode: "vertical-lr", WebkitAppearance: "slider-vertical", height: 60, width: 14 } as React.CSSProperties} />
         </div>
       </div>
 
-      {/* Main Content */}
+      {/* Main */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top Bar */}
         <div className="h-12 bg-slate-900 border-b border-slate-800 flex items-center px-4 gap-3 flex-shrink-0">
@@ -574,46 +559,29 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
             <span className="text-sm text-slate-300 truncate font-medium">{fileName}</span>
           </div>
           <div className="w-px h-6 bg-slate-700" />
-
-          {/* Page Navigation */}
           <div className="flex items-center gap-1">
             <button onClick={() => goToPage(currentPage - 1)} disabled={currentPage <= 1} className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-20 transition-all">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6" /></svg>
             </button>
-            <span className="text-xs text-slate-300 font-mono px-2">Page {currentPage} of {numPages}</span>
+            <span className="text-xs text-slate-300 font-mono px-2">Page {currentPage} / {numPages}</span>
             <button onClick={() => goToPage(currentPage + 1)} disabled={currentPage >= numPages} className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-20 transition-all">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6" /></svg>
             </button>
           </div>
-
           <div className="w-px h-6 bg-slate-700" />
-
-          {/* Zoom Controls */}
           <div className="flex items-center gap-1">
-            <button onClick={() => changeZoom(-25)} className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 transition-all" title="Zoom out (Cmd+-)">
+            <button onClick={() => changeZoom(-25)} className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 transition-all" title="Zoom out">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /><line x1="8" y1="11" x2="14" y2="11" /></svg>
             </button>
-            <button onClick={() => setZoom(100)} className="px-2 py-1 rounded-md text-xs text-slate-300 hover:bg-slate-800 font-mono transition-all min-w-[48px] text-center" title="Reset zoom (Cmd+0)">
-              {zoom}%
-            </button>
-            <button onClick={() => changeZoom(25)} className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 transition-all" title="Zoom in (Cmd+=)">
+            <button onClick={() => setZoom(100)} className="px-2 py-1 rounded-md text-xs text-slate-300 hover:bg-slate-800 font-mono transition-all min-w-[48px] text-center" title="Reset zoom">{zoom}%</button>
+            <button onClick={() => changeZoom(25)} className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 transition-all" title="Zoom in">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /><line x1="11" y1="8" x2="11" y2="14" /><line x1="8" y1="11" x2="14" y2="11" /></svg>
             </button>
           </div>
-
           <div className="flex-1" />
-
-          {saving && (
-            <div className="flex items-center gap-1.5 mr-2">
-              <div className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse" />
-              <span className="text-[11px] text-amber-400">Saving...</span>
-            </div>
-          )}
-
+          {saving && <div className="flex items-center gap-1.5 mr-2"><div className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse" /><span className="text-[11px] text-amber-400">Saving...</span></div>}
           <button onClick={handleDownload} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
-            </svg>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
             Download
           </button>
           <button onClick={onClose} className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 transition-all" title="Close">
@@ -623,7 +591,6 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
 
         {/* Split View */}
         <div className="flex flex-1 overflow-hidden">
-          {/* Canvas Editor */}
           <div ref={editorContainerRef} className="flex-1 overflow-auto bg-slate-800/30">
             {!ready ? (
               <div className="flex items-center justify-center h-full">
@@ -633,22 +600,18 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
                 </div>
               </div>
             ) : (
-              <div className="p-4 min-h-full" style={{ minWidth: "fit-content" }}>
-                <div ref={canvasWrapperRef} className="shadow-2xl shadow-black/50 inline-block">
+              <div className="flex items-start justify-center p-4 min-h-full">
+                <div className="shadow-2xl shadow-black/50">
                   <canvas ref={canvasElRef} />
                 </div>
               </div>
             )}
           </div>
-
-          {/* Divider */}
           <div className="w-px bg-slate-700 flex-shrink-0" />
-
-          {/* Preview Panel */}
           <div className="w-[35%] min-w-[300px] flex flex-col bg-slate-900/50">
-            <div className="h-10 flex items-center justify-between px-4 bg-slate-900 border-b border-slate-800">
+            <div className="h-10 flex items-center px-4 bg-slate-900 border-b border-slate-800">
               <div className="flex items-center gap-2">
-                <div className={`w-2 h-2 rounded-full transition-colors ${saving ? "bg-amber-400 animate-pulse" : "bg-emerald-400"}`} />
+                <div className={`w-2 h-2 rounded-full ${saving ? "bg-amber-400 animate-pulse" : "bg-emerald-400"}`} />
                 <span className="text-xs text-slate-400 font-medium">{saving ? "Updating..." : "Live Preview"}</span>
               </div>
             </div>
