@@ -184,11 +184,13 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
 
     // Size the Fabric canvas to match exactly
     c.setDimensions({ width: viewport.width, height: viewport.height });
+    // Reset any viewport transform (pan/zoom applied via Fabric itself)
+    c.setViewportTransform([1, 0, 0, 1, 0, 0]);
 
-    // Set PDF page as background
+    // Set PDF page as background — temp canvas is already the right pixel size
     const bgImage = await f.FabricImage.fromURL(tempCanvas.toDataURL());
-    bgImage.scaleX = viewport.width / bgImage.width;
-    bgImage.scaleY = viewport.height / bgImage.height;
+    // Force top-left origin so the image fills from (0,0); default may be center which clips the page
+    bgImage.set({ left: 0, top: 0, originX: 'left', originY: 'top', scaleX: 1, scaleY: 1 });
 
     // Clear old objects, set new background
     c.getObjects().slice().forEach((o: any) => c.remove(o)); // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -207,6 +209,9 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
       }
     }
     c.renderAll();
+    // Scroll editor container back to top so the full page is visible from the start
+    container.scrollTop = 0;
+    container.scrollLeft = 0;
 
     // Init history
     if (!historyRef.current.has(pageNum)) {
