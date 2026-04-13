@@ -34,6 +34,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
   const [canRedo, setCanRedo] = useState(false);
 
   const canvasElRef = useRef<HTMLCanvasElement>(null);
+  const editorContainerRef = useRef<HTMLDivElement>(null);
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const fabricRef = useRef<any>(null);
   const fabricModule = useRef<any>(null);
@@ -92,7 +93,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
   // --- Auto-save ---
   const triggerAutoSave = useCallback(() => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(() => performAutoSave(), 800);
+    saveTimerRef.current = setTimeout(() => performAutoSave(), 500);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -156,11 +157,24 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
   const renderPage = useCallback(async (pageNum: number, canvas?: any, fabric?: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
     const c = canvas || fabricRef.current;
     const f = fabric || fabricModule.current;
+    const container = editorContainerRef.current;
     if (!c || !f || !pdfDocRef.current) return;
 
     isNavigatingRef.current = true;
     const page = await pdfDocRef.current.getPage(pageNum);
-    const viewport = page.getViewport({ scale: RENDER_SCALE });
+
+    // Calculate scale to fit the editor container
+    const baseViewport = page.getViewport({ scale: 1 });
+    let scale = RENDER_SCALE;
+    if (container) {
+      const pad = 48;
+      const maxW = container.clientWidth - pad;
+      const maxH = container.clientHeight - pad;
+      scale = Math.min(maxW / baseViewport.width, maxH / baseViewport.height);
+      scale = Math.max(0.5, scale); // minimum 0.5x
+    }
+
+    const viewport = page.getViewport({ scale });
 
     const tempCanvas = document.createElement("canvas");
     tempCanvas.width = viewport.width;
@@ -620,7 +634,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
         {/* Split View */}
         <div className="flex flex-1 overflow-hidden">
           {/* Canvas Editor */}
-          <div className="flex-1 flex items-center justify-center bg-slate-800/30 overflow-auto">
+          <div ref={editorContainerRef} className="flex-1 flex items-center justify-center bg-slate-800/30 overflow-auto">
             {!ready ? (
               <div className="flex flex-col items-center gap-4 text-slate-400">
                 <div className="w-10 h-10 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
@@ -647,7 +661,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
               </div>
             </div>
             {previewUrl ? (
-              <iframe src={previewUrl} className="flex-1 w-full bg-white" title="PDF Preview" />
+              <iframe key={previewUrl} src={previewUrl} className="flex-1 w-full bg-white" title="PDF Preview" />
             ) : (
               <div className="flex-1 flex items-center justify-center text-slate-600 text-sm">
                 Preview loading...
