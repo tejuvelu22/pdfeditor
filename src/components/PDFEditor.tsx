@@ -617,7 +617,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
               </div>
             )}
             {/* Always in DOM so canvasContainerRef is available when Fabric inits */}
-            <div className={`flex items-start justify-center p-4 min-h-full ${!ready ? "hidden" : ""}`}>
+            <div className={`flex items-start justify-center p-4 min-h-full min-w-full ${!ready ? "hidden" : ""}`}>
               {/* Outer div reserves zoomed layout space so the container scrolls correctly */}
               <div style={{ width: canvasSize.w * zoom / 100, height: canvasSize.h * zoom / 100, flexShrink: 0 }}>
                 {/* React owns this div; Fabric appends the canvas inside it imperatively */}
