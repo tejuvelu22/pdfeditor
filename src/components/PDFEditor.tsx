@@ -247,10 +247,16 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
     const init = async () => {
       const fabric = await import("fabric");
       fabricModule.current = fabric;
-      const canvas = new fabric.Canvas(canvasElRef.current!, { isDrawingMode: true, selection: false });
+      const canvas = new fabric.Canvas(canvasElRef.current!, {
+        isDrawingMode: true,
+        selection: false,
+        enableRetinaScaling: false, // retina doubles pixel count → kills draw perf
+        renderOnAddRemove: false,   // batch renders, don't redraw on every add
+      });
       const brush = new fabric.PencilBrush(canvas);
       brush.color = colorRef.current;
       brush.width = strokeWidthRef.current;
+      brush.decimate = 2; // reduce point simplification overhead for faster input
       canvas.freeDrawingBrush = brush;
       fabricRef.current = canvas;
 
@@ -352,18 +358,20 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
         canvas.selection = true;
         canvas.getObjects().forEach((o: any) => o.set({ selectable: true, evented: true })); // eslint-disable-line @typescript-eslint/no-explicit-any
         break;
-      case "draw":
+      case "draw": {
         canvas.isDrawingMode = true;
-        canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
-        canvas.freeDrawingBrush.color = color;
-        canvas.freeDrawingBrush.width = strokeWidth;
+        const db = new fabric.PencilBrush(canvas);
+        db.color = color; db.width = strokeWidth; db.decimate = 2;
+        canvas.freeDrawingBrush = db;
         break;
-      case "highlight":
+      }
+      case "highlight": {
         canvas.isDrawingMode = true;
-        canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
-        canvas.freeDrawingBrush.color = color + "55";
-        canvas.freeDrawingBrush.width = Math.max(20, strokeWidth * 6);
+        const hb = new fabric.PencilBrush(canvas);
+        hb.color = color + "55"; hb.width = Math.max(20, strokeWidth * 6); hb.decimate = 2;
+        canvas.freeDrawingBrush = hb;
         break;
+      }
       case "eraser": canvas.defaultCursor = "not-allowed"; break;
       case "text":
         canvas.defaultCursor = "text";
