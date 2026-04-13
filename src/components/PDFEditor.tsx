@@ -161,10 +161,12 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
     const pdfW = baseVP.width;   // PDF points (e.g. 612)
     const pdfH = baseVP.height;  // PDF points (e.g. 792)
 
-    // Calculate the scale where the page fits the container at zoom=100
+    // Measure the container. Use window size as fallback if container hasn't laid out yet.
+    const containerW = container.clientWidth > 100 ? container.clientWidth : window.innerWidth * 0.6;
+    const containerH = container.clientHeight > 100 ? container.clientHeight : window.innerHeight - 60;
     const pad = 40;
-    const maxW = container.clientWidth - pad;
-    const maxH = container.clientHeight - pad;
+    const maxW = containerW - pad;
+    const maxH = containerH - pad;
     const fitScale = Math.min(maxW / pdfW, maxH / pdfH);
 
     // Actual render scale = fitScale * zoom/100
@@ -313,6 +315,8 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
         }
       });
 
+      // Wait for layout to settle before measuring container
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
       await renderPage(1, canvas, fabric);
     };
     init();
