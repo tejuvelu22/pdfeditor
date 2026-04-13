@@ -25,7 +25,7 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
   const [zoom, setZoom] = useState(100);
   const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
 
-  const canvasElRef = useRef<HTMLCanvasElement>(null);
+  const canvasContainerRef = useRef<HTMLDivElement>(null); // React owns this div; Fabric owns the canvas inside
   const editorContainerRef = useRef<HTMLDivElement>(null);
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const fabricRef = useRef<any>(null);
@@ -244,11 +244,16 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
 
   // --- Init Fabric.js ---
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || !canvasContainerRef.current) return;
     const init = async () => {
       const fabric = await import("fabric");
       fabricModule.current = fabric;
-      const canvas = new fabric.Canvas(canvasElRef.current!, {
+      // Create the canvas element imperatively so React never owns it.
+      // Fabric wraps it in its own div on init, which would break React's DOM
+      // reconciler if React held a ref to the element directly.
+      const canvasEl = document.createElement("canvas");
+      canvasContainerRef.current!.appendChild(canvasEl);
+      const canvas = new fabric.Canvas(canvasEl, {
         isDrawingMode: true,
         selection: false,
         enableRetinaScaling: false, // retina doubles pixel count → kills draw perf
@@ -603,27 +608,26 @@ export default function PDFEditor({ pdfData, fileName, onClose }: Props) {
         {/* Split View */}
         <div className="flex flex-1 overflow-hidden">
           <div ref={editorContainerRef} className="flex-1 overflow-auto bg-slate-800/30">
-            {!ready ? (
+            {!ready && (
               <div className="flex items-center justify-center h-full">
                 <div className="flex flex-col items-center gap-4 text-slate-400">
                   <div className="w-10 h-10 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
                   <span className="text-sm">Loading PDF...</span>
                 </div>
               </div>
-            ) : (
-              <div className="flex items-start justify-center p-4 min-h-full">
-                {/* Outer div reserves the zoomed layout space so the container scrolls correctly */}
-                <div style={{ width: canvasSize.w * zoom / 100, height: canvasSize.h * zoom / 100, flexShrink: 0 }}>
-                  {/* Inner div scales visually — CSS transform doesn't affect layout so we need the outer sizer */}
-                  <div
-                    className="shadow-2xl shadow-black/50"
-                    style={{ transformOrigin: 'top left', transform: `scale(${zoom / 100})` }}
-                  >
-                    <canvas ref={canvasElRef} />
-                  </div>
-                </div>
-              </div>
             )}
+            {/* Always in DOM so canvasContainerRef is available when Fabric inits */}
+            <div className={`flex items-start justify-center p-4 min-h-full ${!ready ? "hidden" : ""}`}>
+              {/* Outer div reserves zoomed layout space so the container scrolls correctly */}
+              <div style={{ width: canvasSize.w * zoom / 100, height: canvasSize.h * zoom / 100, flexShrink: 0 }}>
+                {/* React owns this div; Fabric appends the canvas inside it imperatively */}
+                <div
+                  ref={canvasContainerRef}
+                  className="shadow-2xl shadow-black/50"
+                  style={{ transformOrigin: 'top left', transform: `scale(${zoom / 100})` }}
+                />
+              </div>
+            </div>
           </div>
           <div className="w-px bg-slate-700 flex-shrink-0" />
           <div className="w-[35%] min-w-[300px] flex flex-col bg-slate-900/50">
